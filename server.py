@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +16,9 @@ from io import BytesIO
 
 # Import your existing ImageMatcher class
 from image_matcher import ImageMatcher
+
+# Import database components
+from database import get_db, Embedding
 
 class WebImageMatcher(ImageMatcher):
     """Concrete implementation of ImageMatcher for web interface"""
@@ -54,7 +57,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Create an instance of WebImageMatcher instead of ImageMatcher
+# Create an instance of WebImageMatcher
 matcher = WebImageMatcher()
 
 # Serve static files (if you have any CSS, JS, etc.)
@@ -65,6 +68,34 @@ templates = Jinja2Templates(directory="templates")
 
 class ImageRequest(BaseModel):
     image: str  # Base64 encoded image
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint to verify server and database status."""
+    try:
+        # Check database connection by making a simple query
+        db = next(get_db())
+        db.query(Embedding).limit(1).all()
+        db.close()
+        
+        # Check if CLIP model is loaded
+        device = matcher.device
+        model_status = "loaded" if matcher.model is not None else "not loaded"
+        
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "model": model_status,
+            "device": str(device)
+        }
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "unhealthy",
+                "error": str(e)
+            }
+        )
 
 @app.get("/", response_class=HTMLResponse)
 async def root(request: Request):
