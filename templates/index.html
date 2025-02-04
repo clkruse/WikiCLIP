@@ -99,6 +99,10 @@
                     throw new Error(data.error || 'Failed to process image');
                 }
                 
+                if (!data.results || !Array.isArray(data.results)) {
+                    throw new Error('Invalid response format from server');
+                }
+                
                 // Instead of directly displaying results, fetch additional info for each article
                 const enhancedResults = await Promise.all(
                     data.results.map(article => getArticleInfo(article))

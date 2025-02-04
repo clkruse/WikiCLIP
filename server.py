@@ -136,7 +136,10 @@ async def find_similar(image_request: ImageRequest):
         return {"results": results}
     
     except Exception as e:
-        return {"error": str(e)}, 500
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
 
 if __name__ == "__main__":
     # Create SSL context
