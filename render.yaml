@@ -2,15 +2,13 @@ services:
   - type: web
     name: wikiclip-api
     env: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: |
+      pip install -r requirements.txt
+      python migrations.py
     startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
         value: 3.10.0
-      - key: DATABASE_URL
-        fromDatabase:
-          name: wikiclip-db
-          property: connectionString
 
 databases:
   - name: wikiclip-db

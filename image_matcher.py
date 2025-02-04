@@ -13,16 +13,18 @@ class BaseEmbeddingsReader(ABC):
     """Abstract base class for embedding readers."""
     
     def __init__(self, 
-                 model_name: str = "openai/clip-vit-base-patch32"):
+                 model_name: str = "openai/clip-vit-base-patch32",
+                 db: Optional[Session] = None):
         """Initialize the base reader with common functionality."""
         self.device = self._get_device()
         self.model = CLIPModel.from_pretrained(model_name).to(self.device)
         self.processor = CLIPProcessor.from_pretrained(model_name)
-        self.db = SessionLocal()
+        self.db = db or SessionLocal()
+        self._owns_db = db is None  # Track if we created the db session
 
     def __del__(self):
         """Cleanup database connection."""
-        if hasattr(self, 'db'):
+        if hasattr(self, 'db') and self._owns_db:
             self.db.close()
 
     @staticmethod

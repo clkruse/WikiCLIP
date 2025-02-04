@@ -1,10 +1,11 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Union, List, Dict
+from sqlalchemy.orm import Session
 
 import base64
 import numpy as np
@@ -49,7 +50,6 @@ class WebImageMatcher(ImageMatcher):
         except Exception as e:
             raise Exception(f"Error processing image: {str(e)}")
 
-# Create FastAPI app
 app = FastAPI()
 
 # Add CORS middleware
@@ -61,8 +61,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Create an instance of WebImageMatcher
-matcher = WebImageMatcher()
+# Create a function to get a matcher instance with a database session
+def get_matcher(db: Session = Depends(get_db)) -> WebImageMatcher:
+    return WebImageMatcher(db=db)
 
 # Serve static files (if you have any CSS, JS, etc.)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -74,15 +75,14 @@ class ImageRequest(BaseModel):
     image: str  # Base64 encoded image
 
 @app.get("/health")
-async def health_check():
+async def health_check(db: Session = Depends(get_db)):
     """Health check endpoint to verify server and database status."""
     try:
         # Check database connection by making a simple query
-        db = next(get_db())
         db.query(Embedding).limit(1).all()
-        db.close()
         
         # Check if CLIP model is loaded
+        matcher = WebImageMatcher(db=db)
         device = matcher.device
         model_status = "loaded" if matcher.model is not None else "not loaded"
         
@@ -107,7 +107,7 @@ async def root(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 @app.post("/api/find-similar")
-async def find_similar(image_request: ImageRequest):
+async def find_similar(image_request: ImageRequest, matcher: WebImageMatcher = Depends(get_matcher)):
     try:
         # Remove the data URL prefix if present
         if "base64," in image_request.image:
