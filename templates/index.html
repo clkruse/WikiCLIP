@@ -83,7 +83,12 @@
             results.innerHTML = '';
             
             try {
-                const response = await fetch('/api/find-similar', {
+                // Get the API base URL - use environment-specific URL
+                const apiBaseUrl = window.location.hostname === 'calebkruse.com' 
+                    ? 'https://wikiclip-api.onrender.com'  // Render deployment URL
+                    : '';  // Empty string for local development
+                
+                const response = await fetch(`${apiBaseUrl}/api/find-similar`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
