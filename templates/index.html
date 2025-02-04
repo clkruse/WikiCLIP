@@ -1,0 +1,298 @@
+<!-- Changes to index.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WikiCLIP</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- OpenGraph Meta Tags -->
+    <meta property="og:title" content="WikiCLIP">
+    <meta property="og:description" content="Find Wikipedia articles using image search powered by CLIP">
+    <meta property="og:image" content="/wikitrip/bkg.jpg">
+    <meta property="og:type" content="website">
+    <meta name="twitter:card" content="summary_large_image">
+    <link href="https://fonts.googleapis.com/css?family=Crimson+Text:400,400i,600,600i,700,700i&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="../static/style.css">
+</head>
+<body>
+    <div class="landing-container">
+        <div class="page-title">
+            <h1 class="header"><a href="/" style="text-decoration: none; color: inherit;">WikiCLIP</a></h1>
+        </div>
+
+        <div class="container">
+            <div class="camera-container">
+                <canvas id="canvas" style="display: none;"></canvas>
+                <img id="captured-image" style="display: none;" alt="Captured image">
+                
+                <div class="button-container">
+                    <div class="button-wrapper">
+                        <label class="explore-button" for="file-input">
+                            Explore an Image
+                            <input type="file" id="file-input" accept="image/*" style="display: none;">
+                        </label>
+                    </div>
+                    <div class="help-link-wrapper">
+                        <a href="/how-it-works" class="help-link" style="display: none;">How does this work?</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="loader" id="loader"></div>
+    <div class="results-container" id="results">
+        <!-- Results will be dynamically inserted here -->
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const capturedImage = document.getElementById('captured-image');
+        const fileInput = document.getElementById('file-input');
+        const loader = document.getElementById('loader');
+        const results = document.getElementById('results');
+
+        // File upload functionality
+        fileInput.addEventListener('change', (e) => {
+            // Clear previous results first
+            capturedImage.style.display = 'none';
+            results.innerHTML = '';
+            
+            const file = e.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    capturedImage.src = event.target.result;
+                    capturedImage.style.display = 'block';
+                    document.querySelector('.landing-container').classList.add('image-loaded');
+                    // Update the button text while preserving the input element
+                    const exploreButton = document.querySelector('.explore-button');
+                    const inputElement = exploreButton.querySelector('input');
+                    exploreButton.innerHTML = 'Explore Another Image';
+                    exploreButton.appendChild(inputElement);
+                    // Show the help link
+                    document.querySelector('.help-link').style.display = 'block';
+                    processImage(event.target.result);
+                };
+                reader.readAsDataURL(file);
+            }
+        });
+
+        // Process image and display results
+        async function processImage(imageData) {
+            loader.style.display = 'block';
+            results.innerHTML = '';
+            
+            try {
+                const response = await fetch('/api/find-similar', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ 
+                        image: imageData
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (!response.ok || data.error) {
+                    throw new Error(data.error || 'Failed to process image');
+                }
+                
+                // Instead of directly displaying results, fetch additional info for each article
+                const enhancedResults = await Promise.all(
+                    data.results.map(article => getArticleInfo(article))
+                );
+                
+                displayResults(enhancedResults);
+            } catch (error) {
+                console.error('Error processing image:', error);
+                results.innerHTML = `<div class="article-card">
+                    <div class="similarity-indicator" style="background-color: #dc3545;">!</div>
+                    <div class="article-content">
+                        <h2>Error</h2>
+                        <p>${error.message}</p>
+                    </div>
+                </div>`;
+            } finally {
+                loader.style.display = 'none';
+            }
+        }
+
+        async function getArticleInfo(article) {
+            // Base Wikipedia API URL
+            const url = "https://en.wikipedia.org/w/api.php";
+            
+            // Parameters for the API request
+            const params = {
+                action: "query",
+                format: "json",
+                titles: article.title,
+                prop: "extracts|pageimages|description|info",
+                inprop: "url",
+                piprop: "thumbnail",
+                pithumbsize: "250",
+                exintro: "True",
+                explaintext: "True",
+                origin: "*"  // Required for CORS
+            };
+
+            // Build the query URL
+            const queryUrl = url + "?" + Object.entries(params)
+                .map(([key, value]) => `${key}=${encodeURIComponent(value)}`)
+                .join("&");
+            console.log(queryUrl);
+
+            try {
+                const response = await fetch(queryUrl);
+                const data = await response.json();
+                
+                // Get the first (and only) page from the response
+                const pages = data.query.pages;
+                const pageId = Object.keys(pages)[0];
+                const page = pages[pageId];
+
+                // Enhance the original article object with the new data
+                return {
+                    ...article,
+                    extract: page.extract || '',
+                    thumbnail: page.thumbnail?.source || null,
+                    description: page.description || '',
+                    url: page.fullurl || `https://en.wikipedia.org/wiki/${encodeURIComponent(article.title)}`,
+                    category: page.description ? 
+                        page.description.charAt(0).toUpperCase() + page.description.slice(1) : ''
+                };
+            } catch (error) {
+                console.error('Error fetching article info:', error);
+                // Return original article if fetch fails
+                return article;
+            }
+        }
+
+        function getColorFromScore(score, minScore, maxScore) {
+            // Define our color stops
+            const colors = {
+                low: [27, 152, 153],    // Teal for low matches
+                mid: [230, 172, 14],    // Yellow/Orange for mid-range matches
+                high: [240, 132, 123]   // Red for high matches
+            };
+            
+            // Scale the score to 0-1 based on min/max range
+            const range = maxScore - minScore;
+            const position = range === 0 ? 0.5 : (score - minScore) / range;
+            
+            let color = [];
+            if (position < 0.5) {
+                // Interpolate between low and mid colors
+                const factor = position * 2; // Scale 0-0.5 to 0-1
+                for (let i = 0; i < 3; i++) {
+                    color[i] = Math.round(colors.low[i] + (colors.mid[i] - colors.low[i]) * factor);
+                }
+            } else {
+                // Interpolate between mid and high colors
+                const factor = (position - 0.5) * 2; // Scale 0.5-1 to 0-1
+                for (let i = 0; i < 3; i++) {
+                    color[i] = Math.round(colors.mid[i] + (colors.high[i] - colors.mid[i]) * factor);
+                }
+            }
+            
+            return `rgb(${color.join(',')})`;
+        }
+
+        function displayResults(similarImages) {
+            results.innerHTML = '';
+            // Find min and max similarity scores
+            const scores = similarImages.map(image => image.similarity);
+            const minScore = Math.min(...scores);
+            const maxScore = Math.max(...scores);
+            
+            similarImages.forEach(image => {
+                const articleContainer = document.createElement('div');
+                articleContainer.className = 'article-container';
+                
+                const link = document.createElement('a');
+                link.href = image.url;
+                link.target = '_blank';
+                
+                const card = document.createElement('div');
+                card.className = 'article-card';
+                
+                // Info section with indicators
+                const info = document.createElement('div');
+                info.className = 'info';
+                
+                // Distance indicator (showing match percentage)
+                const color = getColorFromScore(image.similarity, minScore, maxScore);
+                
+                const distanceIndicator = document.createElement('div');
+                distanceIndicator.style.backgroundColor = color;
+                distanceIndicator.className = 'bullet distance';
+                const distanceText = document.createElement('p');
+                distanceText.innerHTML = `${(image.similarity * 100).toFixed(1)}%<a>match</a>`;
+                distanceIndicator.appendChild(distanceText);
+                
+                info.appendChild(distanceIndicator);
+                card.appendChild(info);
+                
+                // Title and category
+                const title = document.createElement('h2');
+                title.textContent = image.title;
+                
+                const subtext = document.createElement('h5');
+                subtext.className = 'subtext';
+                subtext.textContent = image.category || '';
+                
+                card.appendChild(title);
+                card.appendChild(subtext);
+                
+                // Thumbnail image if available
+                if (image.thumbnail) {
+                    const imageContainer = document.createElement('div');
+                    imageContainer.className = 'thumbnail';
+                    
+                    const img = document.createElement('img');
+                    img.src = image.thumbnail;
+                    img.alt = image.title;
+                    
+                    imageContainer.appendChild(img);
+                    card.appendChild(imageContainer);
+                }
+                
+                // Article text
+                if (image.extract) {
+                    const text = document.createElement('p');
+                    text.className = 'article-text';
+                    const truncatedText = image.extract.split(' ').slice(0, 32).join(' ');
+                    text.textContent = truncatedText + (image.extract.length > truncatedText.length ? '...' : '');
+                    card.appendChild(text);
+                }
+                
+                link.appendChild(card);
+                articleContainer.appendChild(link);
+                results.appendChild(articleContainer);
+            });
+        }
+    </script>
+
+    <style>
+        .button-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .help-link {
+            display: none;
+            text-align: center;
+            font-size: 0.8em;
+            color: #999;
+            text-decoration: none;
+        }
+
+        .help-link:hover {
+            text-decoration: underline;
+        }
+    </style>
+</body>
+</html>
