@@ -1,56 +1,91 @@
-from sqlalchemy import create_engine, Column, Integer, String, LargeBinary, DateTime, Float
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
 import os
+from supabase import create_client, Client
+import numpy as np
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 
-# Debug environment variables
-print("All environment variables:", dict(os.environ))
-print("Current working directory:", os.getcwd())
-
-# Get database URL from environment variable
-DATABASE_URL = os.getenv("DATABASE_URL")
-print("Raw DATABASE_URL:", DATABASE_URL)
-
-if not DATABASE_URL:
-    raise ValueError("DATABASE_URL environment variable is not set. Please ensure it is configured in Render.")
-
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-    print("Modified DATABASE_URL to use postgresql:// prefix")
-
-# Create SQLAlchemy engine
-print("Final database URL:", DATABASE_URL.split("@")[0] + "@" + "XXXXX")  # Hide credentials
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-Base = declarative_base()
-
-class Embedding(Base):
-    __tablename__ = "embeddings"
-
-    article_id = Column(String, primary_key=True)
-    title = Column(String, index=True)
-    url = Column(String)
-    embedding = Column(LargeBinary)
-    processed_date = Column(String)
-    hash = Column(String)
-
-class FailedArticle(Base):
-    __tablename__ = "failed_articles"
-
-    article_id = Column(String, primary_key=True)
-    title = Column(String)
-    error_message = Column(String)
-    attempt_date = Column(String)
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-# Create tables
-def init_db():
-    Base.metadata.create_all(bind=engine) 
+class Database:
+    def __init__(self):
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_KEY")
+        
+        if not supabase_url or not supabase_key:
+            raise ValueError("SUPABASE_URL and SUPABASE_KEY environment variables must be set")
+        
+        self.supabase: Client = create_client(supabase_url, supabase_key)
+    
+    def add_embedding(self, article_id: str, title: str, url: str, embedding: np.ndarray, hash_val: str) -> None:
+        """Add an embedding to the database."""
+        data = {
+            "article_id": article_id,
+            "title": title,
+            "url": url,
+            "embedding": embedding.tolist(),  # Convert numpy array to list for JSON serialization
+            "processed_date": datetime.now().isoformat(),
+            "hash": hash_val
+        }
+        
+        self.supabase.table('embeddings').upsert(data).execute()
+    
+    def add_failed_article(self, article_id: str, title: str, error_message: str) -> None:
+        """Add a failed article to the database."""
+        data = {
+            "article_id": article_id,
+            "title": title,
+            "error_message": error_message,
+            "attempt_date": datetime.now().isoformat()
+        }
+        
+        self.supabase.table('failed_articles').upsert(data).execute()
+    
+    def get_embedding(self, article_id: str) -> Optional[Tuple[np.ndarray, str]]:
+        """Get an embedding from the database by article ID."""
+        response = self.supabase.table('embeddings') \
+            .select('embedding, hash') \
+            .eq('article_id', article_id) \
+            .execute()
+        
+        if not response.data:
+            return None
+        
+        embedding_list = response.data[0]['embedding']
+        hash_val = response.data[0]['hash']
+        return np.array(embedding_list, dtype=np.float32), hash_val
+    
+    def get_similar_articles(self, query_embedding: np.ndarray, limit: int = 5) -> List[Dict[str, Any]]:
+        """
+        Find similar articles using vector similarity search.
+        Uses pgvector's L2 distance by default in Supabase.
+        """
+        # Convert numpy array to list for JSON serialization
+        embedding_list = query_embedding.tolist()
+        
+        # Using Postgres vector operators through Supabase
+        response = self.supabase.rpc(
+            'match_articles',  # We'll create this function
+            {
+                'query_embedding': embedding_list,
+                'match_threshold': 0.75,
+                'match_count': limit
+            }
+        ).execute()
+        
+        return response.data
+    
+    def article_exists(self, article_id: str) -> bool:
+        """Check if an article exists in the database."""
+        response = self.supabase.table('embeddings') \
+            .select('article_id') \
+            .eq('article_id', article_id) \
+            .execute()
+        
+        return len(response.data) > 0
+    
+    def get_failed_article(self, article_id: str) -> Optional[Dict[str, Any]]:
+        """Get a failed article from the database."""
+        response = self.supabase.table('failed_articles') \
+            .select('*') \
+            .eq('article_id', article_id) \
+            .execute()
+        
+        return response.data[0] if response.data else None 

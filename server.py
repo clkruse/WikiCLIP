@@ -14,15 +14,20 @@ import uvicorn
 import ssl
 from PIL import Image
 from io import BytesIO
+import os
+from dotenv import load_dotenv
 
 # Import your existing ImageMatcher class
 from image_matcher import ImageMatcher
 
 # Import database components
-from database import get_db, Embedding, init_db
+from database import get_db, Embedding, init_db, Database
 
 # Initialize the database tables
 init_db()
+
+# Load environment variables
+load_dotenv()
 
 class WebImageMatcher(ImageMatcher):
     """Concrete implementation of ImageMatcher for web interface"""
@@ -144,6 +149,29 @@ async def find_similar(image_request: ImageRequest, matcher: WebImageMatcher = D
             status_code=500,
             content={"error": str(e)}
         )
+
+@app.route('/api/search', methods=['POST'])
+def search():
+    try:
+        # Get the image data from the request
+        if 'image' not in request.files:
+            return jsonify({'error': 'No image provided'}), 400
+        
+        image_file = request.files['image']
+        
+        # Generate embedding for the query image
+        query_embedding = image_matcher.get_image_embedding(image_file)
+        
+        # Search for similar articles
+        similar_articles = db.get_similar_articles(query_embedding)
+        
+        return jsonify({
+            'matches': similar_articles
+        })
+    
+    except Exception as e:
+        print(f"Error processing request: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == "__main__":
     # Create SSL context
