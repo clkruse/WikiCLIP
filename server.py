@@ -18,7 +18,10 @@ from io import BytesIO
 from image_matcher import ImageMatcher
 
 # Import database components
-from database import get_db, Embedding
+from database import get_db, Embedding, init_db
+
+# Initialize the database tables
+init_db()
 
 class WebImageMatcher(ImageMatcher):
     """Concrete implementation of ImageMatcher for web interface"""
@@ -46,6 +49,7 @@ class WebImageMatcher(ImageMatcher):
         except Exception as e:
             raise Exception(f"Error processing image: {str(e)}")
 
+# Create FastAPI app
 app = FastAPI()
 
 # Add CORS middleware
