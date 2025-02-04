@@ -1,12 +1,10 @@
-from fastapi import FastAPI, Request, Depends
+from fastapi import FastAPI, Request, File, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Union, List, Dict
-from sqlalchemy.orm import Session
-
 import base64
 import numpy as np
 import torch
@@ -17,43 +15,16 @@ from io import BytesIO
 import os
 from dotenv import load_dotenv
 
-# Import your existing ImageMatcher class
+# Import your existing ImageMatcher class and Database
 from image_matcher import ImageMatcher
-
-# Import database components
-from database import get_db, Embedding, init_db, Database
-
-# Initialize the database tables
-init_db()
+from database import Database
 
 # Load environment variables
 load_dotenv()
 
-class WebImageMatcher(ImageMatcher):
-    """Concrete implementation of ImageMatcher for web interface"""
-    
-    def get_similar_articles(self, image_input: Union[str, BytesIO, Image.Image], limit: int = 15) -> List[Dict]:
-        """Find articles similar to the input image."""
-        # Get the embedding for the input image
-        query_embedding = self.get_embedding(image_input).cpu().numpy()
-        # Find similar articles using the base class method
-        return self._find_similar_articles(query_embedding, limit)
-
-    def get_embedding(self, image_input: Union[str, BytesIO, Image.Image]) -> torch.Tensor:
-        """Generate embedding for input image."""
-        try:
-            image = self._load_image(image_input)
-            with torch.no_grad():
-                inputs = self.processor(
-                    images=image,
-                    return_tensors="pt"
-                )
-                image_features = self.model.get_image_features(
-                    **{k: v.to(self.device) for k, v in inputs.items()}
-                )
-                return image_features / image_features.norm(dim=-1, keepdim=True)
-        except Exception as e:
-            raise Exception(f"Error processing image: {str(e)}")
+# Initialize database and image matcher
+db = Database()
+image_matcher = ImageMatcher(db=db)
 
 app = FastAPI()
 
@@ -66,10 +37,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Create a function to get a matcher instance with a database session
-def get_matcher(db: Session = Depends(get_db)) -> WebImageMatcher:
-    return WebImageMatcher(db=db)
-
 # Serve static files (if you have any CSS, JS, etc.)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -80,22 +47,22 @@ class ImageRequest(BaseModel):
     image: str  # Base64 encoded image
 
 @app.get("/health")
-async def health_check(db: Session = Depends(get_db)):
+async def health_check():
     """Health check endpoint to verify server and database status."""
     try:
         # Check database connection by making a simple query
-        db.query(Embedding).limit(1).all()
+        stats = image_matcher.get_database_stats()
         
         # Check if CLIP model is loaded
-        matcher = WebImageMatcher(db=db)
-        device = matcher.device
-        model_status = "loaded" if matcher.model is not None else "not loaded"
+        device = image_matcher.device
+        model_status = "loaded" if image_matcher.model is not None else "not loaded"
         
         return {
             "status": "healthy",
             "database": "connected",
             "model": model_status,
-            "device": str(device)
+            "device": str(device),
+            "stats": stats
         }
     except Exception as e:
         return JSONResponse(
@@ -112,7 +79,7 @@ async def root(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 @app.post("/api/find-similar")
-async def find_similar(image_request: ImageRequest, matcher: WebImageMatcher = Depends(get_matcher)):
+async def find_similar(image_request: ImageRequest):
     try:
         # Remove the data URL prefix if present
         if "base64," in image_request.image:
@@ -130,19 +97,9 @@ async def find_similar(image_request: ImageRequest, matcher: WebImageMatcher = D
         buffer.seek(0)
         
         # Get similar articles using your existing ImageMatcher class
-        similar_articles = matcher.get_similar_articles(buffer, limit=15)
+        similar_articles = image_matcher.get_similar_articles(buffer, limit=15)
         
-        # Format the results
-        results = [
-            {
-                "title": article["title"],
-                "similarity": article["similarity"],
-                "url": article.get("url", "")  # Include URL if available
-            }
-            for article in similar_articles
-        ]
-        
-        return {"results": results}
+        return {"results": similar_articles}
     
     except Exception as e:
         return JSONResponse(
@@ -150,28 +107,24 @@ async def find_similar(image_request: ImageRequest, matcher: WebImageMatcher = D
             content={"error": str(e)}
         )
 
-@app.route('/api/search', methods=['POST'])
-def search():
+@app.post("/api/search")
+async def search(image: UploadFile = File(...)):
     try:
-        # Get the image data from the request
-        if 'image' not in request.files:
-            return jsonify({'error': 'No image provided'}), 400
+        # Read the image file
+        contents = await image.read()
+        image_file = BytesIO(contents)
         
-        image_file = request.files['image']
+        # Get similar articles using the image matcher
+        similar_articles = image_matcher.get_similar_articles(image_file)
         
-        # Generate embedding for the query image
-        query_embedding = image_matcher.get_image_embedding(image_file)
-        
-        # Search for similar articles
-        similar_articles = db.get_similar_articles(query_embedding)
-        
-        return jsonify({
-            'matches': similar_articles
-        })
+        return {"matches": similar_articles}
     
     except Exception as e:
         print(f"Error processing request: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
 
 if __name__ == "__main__":
     # Create SSL context
