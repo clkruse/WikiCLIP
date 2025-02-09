@@ -9,6 +9,9 @@ import time
 import logging
 import asyncio
 import aiohttp
+import os
+from supabase import create_client
+from dotenv import load_dotenv
 
 import base64
 import numpy as np
@@ -17,7 +20,9 @@ import uvicorn
 import ssl
 from PIL import Image
 from io import BytesIO
-import psycopg2
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -25,6 +30,12 @@ logger = logging.getLogger(__name__)
 
 # Import your existing ImageMatcher class and wiki article info function
 from image_matcher import ImageMatcher, get_wiki_article_info
+
+# Initialize Supabase client
+supabase = create_client(
+    os.getenv("SUPABASE_URL"),
+    os.getenv("SUPABASE_KEY")
+)
 
 async def async_wiki_article_info(session: aiohttp.ClientSession, article_id: str) -> Dict[str, str]:
     """Async version of get_wiki_article_info"""
@@ -88,26 +99,25 @@ class WebImageMatcher(ImageMatcher):
         logger.info(f"Embedding conversion took {time.time() - start_time:.2f}s")
         
         db_start_time = time.time()
-        with psycopg2.connect(self.db_url) as conn:
-            with conn.cursor() as cursor:
-                # Use a more optimized query with index scan
-                query_start_time = time.time()
-                cursor.execute("""
-                    SELECT 
-                        article_id,
-                        (embedding <=> %s::vector(512)) as similarity
-                    FROM embeddings
-                    WHERE (embedding <=> %s::vector(512)) < 0.8  -- Adjust threshold as needed
-                    ORDER BY similarity ASC
-                    LIMIT %s
-                """, (embedding_str, embedding_str, limit))
-                logger.info(f"Database query took {time.time() - query_start_time:.2f}s")
-                
-                # Fetch results in batch
-                fetch_start_time = time.time()
-                rows = cursor.fetchall()
-                logger.info(f"Fetching results took {time.time() - fetch_start_time:.2f}s")
-        logger.info(f"Total database operation took {time.time() - db_start_time:.2f}s")
+        try:
+            # Use Supabase RPC call instead of direct PostgreSQL
+            result = (
+                supabase.rpc(
+                    'match_articles',
+                    {
+                        'query_embedding': embedding_list,
+                        'match_threshold': 0.8,
+                        'match_count': limit
+                    }
+                )
+                .execute()
+            )
+            
+            rows = result.data
+            logger.info(f"Database query took {time.time() - db_start_time:.2f}s")
+        except Exception as e:
+            logger.error(f"Database query failed: {str(e)}")
+            raise Exception(f"Failed to query database: {str(e)}")
         
         # Get article info for each result using cached function
         wiki_start_time = time.time()
@@ -116,7 +126,8 @@ class WebImageMatcher(ImageMatcher):
         session = await self.get_session()
         tasks = []
         for row in rows:
-            article_id, similarity = row
+            article_id = row['article_id']
+            similarity = row['similarity']
             tasks.append(asyncio.create_task(
                 async_wiki_article_info(session, article_id)
             ))
@@ -126,12 +137,12 @@ class WebImageMatcher(ImageMatcher):
         
         # Combine results
         results = []
-        for (article_id, similarity), article_info in zip(rows, article_infos):
+        for row, article_info in zip(rows, article_infos):
             results.append({
-                'article_id': article_id,
+                'article_id': row['article_id'],
                 'title': article_info['title'],
                 'url': article_info['url'],
-                'similarity': similarity
+                'similarity': row['similarity']
             })
         
         logger.info(f"Wiki info fetching took {time.time() - wiki_start_time:.2f}s")
