@@ -5,8 +5,11 @@ Pillow
 numpy
 torch
 transformers
-python-dotenv
 requests
 Jinja2
 aiofiles
 supabase
+tqdm
+python-dotenv
+psycopg2
+mwclient

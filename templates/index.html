@@ -83,12 +83,7 @@
             results.innerHTML = '';
             
             try {
-                // Get the API base URL - use environment-specific URL
-                const apiBaseUrl = window.location.hostname === 'calebkruse.com' 
-                    ? 'https://wikiclip-api.onrender.com'  // Render deployment URL
-                    : '';  // Empty string for local development
-                
-                const response = await fetch(`${apiBaseUrl}/api/find-similar`, {
+                const response = await fetch('/api/find-similar', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -100,8 +95,8 @@
                 
                 const data = await response.json();
                 
-                if (!response.ok || data.error) {
-                    throw new Error(data.error || 'Failed to process image');
+                if (!response.ok) {
+                    throw new Error(data.detail || 'Failed to process image');
                 }
                 
                 if (!data.results || !Array.isArray(data.results)) {
@@ -150,7 +145,6 @@
             const queryUrl = url + "?" + Object.entries(params)
                 .map(([key, value]) => `${key}=${encodeURIComponent(value)}`)
                 .join("&");
-            console.log(queryUrl);
 
             try {
                 const response = await fetch(queryUrl);
