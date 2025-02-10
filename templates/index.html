@@ -16,7 +16,7 @@
 <body>
     <div class="landing-container">
         <div class="page-title">
-            <h1 class="header"><a href="/" style="text-decoration: none; color: inherit;">WikiCLIP</a></h1>
+            <h1 class="header"><a href="./" style="text-decoration: none; color: inherit;">WikiCLIP</a></h1>
         </div>
 
         <div class="container">
@@ -32,7 +32,7 @@
                         </label>
                     </div>
                     <div class="help-link-wrapper">
-                        <a href="/how-it-works" class="help-link" style="display: none;">How does this work?</a>
+                        <a href="https://calebkruse.com/10-projects/wikiclip/" class="help-link" style="display: none;">How does this work?</a>
                     </div>
                 </div>
             </div>
@@ -83,7 +83,7 @@
             results.innerHTML = '';
             
             try {
-                const response = await fetch('/api/find-similar', {
+                const response = await fetch('https://itk35nwrg74iwawyyviveovfiy0lntzk.lambda-url.us-east-1.on.aws/', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',

@@ -159,7 +159,32 @@ class LambdaImageMatcher:
             return {}
 
 def lambda_handler(event, context):
-    """AWS Lambda handler function."""
+    # Get the origin from the request
+    origin = event.get('headers', {}).get('origin', '')
+    allowed_domains = [
+        'calebkruse.com',
+        'clkruse.github.io'
+    ]
+    
+    # Check if origin matches any allowed domain
+    is_allowed = any(domain in origin for domain in allowed_domains)
+    cors_origin = origin if is_allowed else f'https://{allowed_domains[0]}'
+    
+    headers = {
+        'Access-Control-Allow-Origin': cors_origin,
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Max-Age': '3600'
+    }
+    
+    # Handle OPTIONS request (preflight)
+    if event['requestContext']['http']['method'] == 'OPTIONS':
+        return {
+            'statusCode': 200,
+            'headers': headers,
+            'body': ''
+        }
+
     try:
         overall_start_time = time.time()
         
@@ -183,13 +208,7 @@ def lambda_handler(event, context):
         
         return {
             'statusCode': 200,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'POST, OPTIONS',
-                'Access-Control-Allow-Headers': 'Content-Type',
-                'Access-Control-Max-Age': '3600'
-            },
+            'headers': headers,
             'body': json.dumps({
                 'results': results,
                 'execution_time': total_time
@@ -200,5 +219,6 @@ def lambda_handler(event, context):
         print(f"[ERROR] {str(e)}")
         return {
             'statusCode': 500,
+            'headers': headers,
             'body': json.dumps({'error': str(e)})
         } 
