@@ -6,6 +6,12 @@ from pprint import pprint
 import numpy as np
 import torch
 import re
+import time
+from transformers import CLIPProcessor, CLIPModel
+from PIL import Image
+import base64
+from io import BytesIO
+from typing import List, Dict
 
 def parse_embedding_string(embedding_str: str) -> np.ndarray:
     """Parse the embedding string from the database into a numpy array."""
@@ -174,6 +180,56 @@ def verify_similarity_computation(embedding1, embedding2):
     if abs(numpy_sim - db_sim) > 0.01:
         print("⚠️  Warning: Large difference between NumPy and database similarity")
 
+def verify_match_sensibility(matcher, image_path: str, results: List[Dict]):
+    """Verify that the matches make semantic sense."""
+    print("\n=== Verifying Match Sensibility ===")
+    
+    # Get the embedding for the test image
+    embedding = matcher.get_embedding(image_path)
+    embedding_list = embedding.cpu().numpy()[0].tolist()
+    embedding_str = f'[{",".join(map(str, embedding_list))}]'
+    
+    # Get raw similarity scores for all articles
+    with psycopg2.connect(matcher.db_url) as conn:
+        with conn.cursor() as cursor:
+            # Get top 100 matches to verify our results are truly the best
+            cursor.execute("""
+                SELECT 
+                    article_id::text,
+                    1 - (embedding <=> %s::vector(512))::float as similarity
+                FROM embeddings
+                ORDER BY embedding <=> %s::vector(512)
+                LIMIT 100
+            """, (embedding_str, embedding_str))
+            all_matches = cursor.fetchall()
+    
+    # Verify our results are among the top matches
+    result_ids = {r['article_id'] for r in results}
+    top_ids = {row[0] for row in all_matches[:len(results)]}
+    
+    print("\nVerification Results:")
+    print(f"Number of results: {len(results)}")
+    print(f"Results in top matches: {len(result_ids.intersection(top_ids))}/{len(results)}")
+    
+    # Check similarity score distribution
+    similarities = [row[1] for row in all_matches]
+    avg_sim = np.mean(similarities)
+    std_sim = np.std(similarities)
+    print(f"\nSimilarity Statistics:")
+    print(f"Average similarity: {avg_sim:.4f}")
+    print(f"Standard deviation: {std_sim:.4f}")
+    print(f"Max similarity: {max(similarities):.4f}")
+    print(f"Min similarity: {min(similarities):.4f}")
+    
+    # Print detailed results
+    print("\nTop 10 matches from verification:")
+    for i, (article_id, sim) in enumerate(all_matches[:10], 1):
+        article_info = get_wiki_article_info(article_id)
+        in_results = "✓" if article_id in result_ids else " "
+        print(f"{in_results} {i}. {article_info['title']} (ID: {article_id}, Similarity: {sim:.4f})")
+    
+    return True
+
 def test_image_matching(image_url: str):
     """Test 3: Image matching functionality"""
     print("\n=== Test 3: Testing Image Matching ===")
@@ -245,6 +301,10 @@ def test_image_matching(image_url: str):
                 print(f"   Article ID: {result['article_id']}")
                 print(f"   Similarity: {result['similarity']:.4f}")
                 print(f"   URL: {result['url']}")
+            
+            # Verify the sensibility of matches
+            verify_match_sensibility(matcher, image_url, results)
+            
         return True
     except Exception as e:
         print(f"✗ Image matching failed: {str(e)}")
@@ -275,16 +335,206 @@ def check_raw_embedding_format():
         print(f"✗ Format check failed: {str(e)}")
         return False
 
-def main():
-    # Test image URL - replace with a real image URL for testing
-    test_image_url = "https://clkruse.github.io/photos/img/photo-2025-01-02.jpg"
+def test_db_query_performance(embedding_str: str, threshold: float = 0.5, limit: int = 15):
+    """Test database query performance with different approaches."""
+    load_dotenv()
+    db_url = os.getenv('DATABASE_URL')
     
-    # Run tests sequentially
-    check_raw_embedding_format()  # Add the new check
-    if test_db_connection():
-        check_embeddings_normalized()
-        if test_wiki_api():
-            test_image_matching(test_image_url)
+    print("\n=== Testing Database Query Performance ===")
+    
+    try:
+        with psycopg2.connect(db_url) as conn:
+            with conn.cursor() as cursor:
+                # Test 1: Original function approach
+                print("\nTest 1: Using match_embeddings function")
+                start_time = time.time()
+                cursor.execute("""
+                    SELECT * FROM match_embeddings(
+                        %s::vector(512),
+                        match_threshold := %s,
+                        match_count := %s
+                    )
+                """, (embedding_str, threshold, limit))
+                rows = cursor.fetchall()
+                print(f"Query time: {time.time() - start_time:.3f}s")
+                print(f"Results found: {len(rows)}")
+                
+                # Test 2: Direct query with CTE
+                print("\nTest 2: Using CTE approach")
+                start_time = time.time()
+                cursor.execute("""
+                    WITH similarity_scores AS (
+                        SELECT 
+                            article_id::text,
+                            1 - (embedding <=> %s::vector(512))::float as similarity
+                        FROM embeddings
+                        WHERE embedding <=> %s::vector(512) < %s
+                        ORDER BY embedding <=> %s::vector(512)
+                        LIMIT %s
+                    )
+                    SELECT * FROM similarity_scores
+                    WHERE similarity > %s
+                    ORDER BY similarity DESC
+                """, (embedding_str, embedding_str, 1 - threshold, embedding_str, limit * 2, threshold))
+                rows = cursor.fetchall()
+                print(f"Query time: {time.time() - start_time:.3f}s")
+                print(f"Results found: {len(rows)}")
+                
+                # Test 3: Simple direct query
+                print("\nTest 3: Simple direct query")
+                start_time = time.time()
+                cursor.execute("""
+                    SELECT 
+                        article_id::text,
+                        1 - (embedding <=> %s::vector(512))::float as similarity
+                    FROM embeddings
+                    WHERE embedding <=> %s::vector(512) < %s
+                    ORDER BY embedding <=> %s::vector(512)
+                    LIMIT %s
+                """, (embedding_str, embedding_str, 1 - threshold, embedding_str, limit))
+                rows = cursor.fetchall()
+                print(f"Query time: {time.time() - start_time:.3f}s")
+                print(f"Results found: {len(rows)}")
+                
+                # Get query plan for the fastest approach
+                print("\nAnalyzing query plan:")
+                cursor.execute("""
+                    EXPLAIN ANALYZE
+                    SELECT 
+                        article_id::text,
+                        1 - (embedding <=> %s::vector(512))::float as similarity
+                    FROM embeddings
+                    WHERE embedding <=> %s::vector(512) < %s
+                    ORDER BY embedding <=> %s::vector(512)
+                    LIMIT %s
+                """, (embedding_str, embedding_str, 1 - threshold, embedding_str, limit))
+                plan = cursor.fetchall()
+                print("\n".join([row[0] for row in plan]))
+                
+        return True
+    except Exception as e:
+        print(f"✗ Performance test failed: {str(e)}")
+        return False
+
+def generate_test_embedding():
+    """Generate a test embedding using CLIP model."""
+    print("\nGenerating test embedding...")
+    try:
+        # Initialize CLIP model
+        model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+        processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+        
+        # Create a simple test image (black square)
+        img = Image.new('RGB', (224, 224), color='black')
+        
+        # Process image
+        with torch.no_grad():
+            inputs = processor(images=img, return_tensors="pt")
+            image_features = model.get_image_features(**inputs)
+            embedding = image_features / image_features.norm(dim=-1, keepdim=True)
+            
+        # Convert to string format
+        embedding_list = embedding.cpu().numpy()[0].tolist()
+        embedding_str = f'[{",".join(map(str, embedding_list))}]'
+        
+        return embedding_str
+    except Exception as e:
+        print(f"Error generating test embedding: {str(e)}")
+        return None
+
+def test_similarity_from_article(article_id: str = None):
+    """Test similarity search using an existing article's embedding.
+    
+    Args:
+        article_id (str, optional): Specific article ID to test with. If None, picks a random article.
+    """
+    print("\n=== Testing Similarity Using Existing Article ===")
+    load_dotenv()
+    db_url = os.getenv('DATABASE_URL')
+    
+    try:
+        with psycopg2.connect(db_url) as conn:
+            with conn.cursor() as cursor:
+                # Get source article
+                if article_id is None:
+                    # Get a random article
+                    cursor.execute("""
+                        SELECT article_id, embedding
+                        FROM embeddings
+                        OFFSET floor(random() * (SELECT COUNT(*) FROM embeddings))
+                        LIMIT 1
+                    """)
+                else:
+                    cursor.execute("""
+                        SELECT article_id, embedding
+                        FROM embeddings
+                        WHERE article_id = %s
+                    """, (article_id,))
+                
+                source = cursor.fetchone()
+                if not source:
+                    print("❌ No source article found")
+                    return False
+                
+                source_id, source_embedding = source
+                source_info = get_wiki_article_info(source_id)
+                print(f"\nSource Article:")
+                print(f"  ID: {source_id}")
+                print(f"  Title: {source_info['title']}")
+                print(f"  URL: {source_info['url']}")
+                
+                # Find similar articles
+                print("\nFinding similar articles...")
+                cursor.execute("""
+                    SELECT 
+                        article_id::text,
+                        1 - (embedding <=> %s::vector(512))::float as similarity
+                    FROM embeddings
+                    WHERE article_id != %s  -- Exclude the source article
+                    ORDER BY embedding <=> %s::vector(512)
+                    LIMIT 10
+                """, (source_embedding, source_id, source_embedding))
+                
+                similar = cursor.fetchall()
+                
+                print("\nMost Similar Articles:")
+                for i, (similar_id, similarity) in enumerate(similar, 1):
+                    article_info = get_wiki_article_info(similar_id)
+                    print(f"\n{i}. {article_info['title']}")
+                    print(f"   Article ID: {similar_id}")
+                    print(f"   Similarity: {similarity:.4f}")
+                    print(f"   URL: {article_info['url']}")
+                
+                # Calculate similarity statistics
+                similarities = [sim for _, sim in similar]
+                print(f"\nSimilarity Statistics:")
+                print(f"  Average: {np.mean(similarities):.4f}")
+                print(f"  Std Dev: {np.std(similarities):.4f}")
+                print(f"  Max: {max(similarities):.4f}")
+                print(f"  Min: {min(similarities):.4f}")
+                
+                return True
+                
+    except Exception as e:
+        print(f"❌ Test failed: {str(e)}")
+        return False
+
+def main():
+    """Run all tests."""
+    # Add test_similarity_from_article to the test suite
+    print("\nTesting similarity with existing article...")
+    test_similarity_from_article()
+    
+    # Original tests
+    test_images = [
+        "https://calebkruse.com/photos/img/photo-2025-02-01.jpg",
+        "https://calebkruse.com/photos/img/photo-2025-01-03.jpg",  # Cactus garden
+        "https://calebkruse.com/photos/img/photo-2025-01-02.jpg"  # Cat
+    ]
+    
+    for image_url in test_images:
+        print(f"\nTesting with image: {image_url}")
+        test_image_matching(image_url)
 
 if __name__ == "__main__":
     main() 

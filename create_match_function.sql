@@ -1,5 +1,5 @@
 -- Drop the old function
-DROP FUNCTION match_embeddings(vector,double precision,integer);
+DROP FUNCTION IF EXISTS match_embeddings(vector,double precision,integer);
 
 -- Function to find similar articles given an embedding vector
 CREATE OR REPLACE FUNCTION match_embeddings(
@@ -14,14 +14,14 @@ RETURNS TABLE (
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    -- Negate the <#> operator to get positive similarity
+    -- Use the HNSW index for efficient similarity search
     RETURN QUERY
     SELECT
         e.article_id::text,
-        -(embedding <#> query_embedding)::float as similarity
+        1 - (embedding <=> query_embedding)::float as similarity
     FROM embeddings e
-    WHERE -(embedding <#> query_embedding)::float > match_threshold
-    ORDER BY similarity DESC
+    WHERE embedding <=> query_embedding < (1 - match_threshold)  -- Inverted threshold since <=> returns distance
+    ORDER BY embedding <=> query_embedding
     LIMIT match_count;
 END;
 $$;

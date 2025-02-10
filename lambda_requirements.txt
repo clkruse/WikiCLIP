@@ -1,0 +1,6 @@
+torch
+numpy==1.26.3
+Pillow
+transformers
+requests
+psycopg2-binary
