@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 import base64
 from PIL import Image
 from io import BytesIO
+import json
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -90,23 +91,33 @@ async def find_similar(image_request: ImageRequest):
     try:
         # Resize image before sending to Lambda
         resized_image = resize_base64_image(image_request.image)
+        logger.info("Image resized successfully")
         
         # Prepare the request payload for Lambda
         payload = {
             "image": resized_image,
             "limit": 15,
-            "threshold": 0.5
+            "threshold": 0.1
         }
+        logger.info("Sending request to Lambda")
         
         # Make async request to Lambda
         async with aiohttp.ClientSession() as session:
             async with session.post(LAMBDA_URL, json=payload) as response:
+                logger.info(f"Lambda response status: {response.status}")
+                response_text = await response.text()
+                logger.info(f"Lambda raw response: {response_text}")
+                
                 if response.status != 200:
-                    error_text = await response.text()
-                    logger.error(f"Lambda request failed: {error_text}")
+                    logger.error(f"Lambda request failed: {response_text}")
                     raise HTTPException(status_code=response.status, detail="Lambda processing failed")
                 
-                result = await response.json()
+                try:
+                    result = json.loads(response_text)
+                    logger.info(f"Parsed response: {result}")
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse JSON response: {e}")
+                    raise HTTPException(status_code=500, detail="Invalid JSON response from Lambda")
                 
         logger.info(f"Total API request took {time.time() - start_time:.2f}s")
         return result
