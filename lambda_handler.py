@@ -113,6 +113,9 @@ class LambdaImageMatcher:
             if not rows:
                 return []
             
+            # Log the first result for debugging
+            print(f"[DEBUG] First result - Article ID: {rows[0][0]}, Similarity: {rows[0][1]}")
+            
             # Batch fetch article info
             start_time = time.time()
             article_ids = [str(row[0]) for row in rows]
@@ -192,7 +195,7 @@ def lambda_handler(event, context):
         body = json.loads(event['body']) if isinstance(event.get('body'), str) else event.get('body', {})
         image_data = body.get('image')
         limit = int(body.get('limit', 15))
-        threshold = float(body.get('threshold', 0.5))
+        threshold = float(body.get('threshold', 0.2))
         
         if not image_data:
             return {
