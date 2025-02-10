@@ -5,7 +5,8 @@ DROP FUNCTION IF EXISTS match_embeddings(vector,double precision,integer);
 CREATE OR REPLACE FUNCTION match_embeddings(
     query_embedding vector(512),
     match_threshold float DEFAULT 0.2,
-    match_count int DEFAULT 15
+    match_count int DEFAULT 15,
+    ef_search int DEFAULT 40
 )
 RETURNS TABLE (
     article_id text,
@@ -14,6 +15,9 @@ RETURNS TABLE (
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    -- Set search quality parameter
+    SET LOCAL hnsw.ef_search = ef_search;
+    
     -- Use the HNSW index for efficient similarity search
     RETURN QUERY
     SELECT
