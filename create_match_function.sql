@@ -6,7 +6,7 @@ CREATE OR REPLACE FUNCTION match_embeddings(
     query_embedding vector(512),
     match_threshold float DEFAULT 0.2,
     match_count int DEFAULT 15,
-    ef_search int DEFAULT 40
+    ef_search int DEFAULT 100
 )
 RETURNS TABLE (
     article_id text,
@@ -15,16 +15,13 @@ RETURNS TABLE (
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    -- Set search quality parameter
-    SET LOCAL hnsw.ef_search = ef_search;
-    
-    -- Use the HNSW index for efficient similarity search
+    -- Use the HNSW index directly for efficient similarity search
     RETURN QUERY
     SELECT
         e.article_id::text,
         1 - (embedding <=> query_embedding)::float as similarity
     FROM embeddings e
-    WHERE embedding <=> query_embedding < (1 - match_threshold)  -- Inverted threshold since <=> returns distance
+    WHERE 1 - (embedding <=> query_embedding) > match_threshold
     ORDER BY embedding <=> query_embedding
     LIMIT match_count;
 END;

@@ -99,13 +99,16 @@ class LambdaImageMatcher:
             start_time = time.time()
             conn = get_db_connection()
             with conn.cursor() as cursor:
+                # Direct query using HNSW index
                 cursor.execute("""
-                    SELECT * FROM match_embeddings(
-                        %s::vector(512),
-                        match_threshold := %s,
-                        match_count := %s
-                    )
-                """, (embedding_str, threshold, limit))
+                    SELECT 
+                        article_id::text,
+                        1 - (embedding <=> %s::vector(512))::float as similarity
+                    FROM embeddings
+                    WHERE 1 - (embedding <=> %s::vector(512)) > %s
+                    ORDER BY embedding <=> %s::vector(512)
+                    LIMIT %s
+                """, (embedding_str, embedding_str, threshold, embedding_str, limit))
                 
                 rows = cursor.fetchall()
             print(f"[TIMING] Database query took: {time.time() - start_time:.2f}s")
