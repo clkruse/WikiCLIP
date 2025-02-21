@@ -1,0 +1,1 @@
+{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["es:ESHttpPost","es:ESHttpGet","es:ESHttpPut","es:ESHttpDelete"],"Resource":"arn:aws:es:us-east-1:554729083437:domain/*"}]}
