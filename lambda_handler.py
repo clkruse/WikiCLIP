@@ -1,7 +1,9 @@
 import json
 import os
 import torch
-import psycopg2
+from opensearchpy import OpenSearch, RequestsHttpConnection
+from requests_aws4auth import AWS4Auth
+import boto3
 import numpy as np
 from PIL import Image
 import requests
@@ -13,7 +15,6 @@ import time
 
 # Initialize global instances for reuse across invocations
 _matcher = None
-_db_conn = None
 
 def get_matcher():
     global _matcher
@@ -23,17 +24,10 @@ def get_matcher():
         print(f"[TIMING] Model initialization took: {time.time() - start_time:.2f}s")
     return _matcher
 
-def get_db_connection():
-    global _db_conn
-    if _db_conn is None or _db_conn.closed:
-        start_time = time.time()
-        _db_conn = psycopg2.connect(os.environ['DATABASE_URL'])
-        print(f"[TIMING] DB connection initialization took: {time.time() - start_time:.2f}s")
-    return _db_conn
-
 class LambdaImageMatcher:
     def __init__(self, model_name: str = "openai/clip-vit-base-patch32"):
-        """Initialize the matcher with CLIP model."""
+        """Initialize the matcher with CLIP model and OpenSearch client."""
+        # Initialize CLIP model
         start_time = time.time()
         self.device = "cpu"  # Lambda only supports CPU
         self.model = CLIPModel.from_pretrained(model_name).to(self.device)
@@ -45,6 +39,27 @@ class LambdaImageMatcher:
         
         self.model.eval()  # Ensure model is in eval mode
         torch.set_grad_enabled(False)  # Disable gradient computation globally
+        
+        # Initialize OpenSearch client
+        region = os.environ.get('AWS_REGION', 'us-east-1')
+        service = 'es'
+        credentials = boto3.Session().get_credentials()
+        awsauth = AWS4Auth(
+            credentials.access_key,
+            credentials.secret_key,
+            region,
+            service,
+            session_token=credentials.token
+        )
+        
+        self.opensearch = OpenSearch(
+            hosts=[{'host': os.environ['OPENSEARCH_ENDPOINT'], 'port': 443}],
+            http_auth=awsauth,
+            use_ssl=True,
+            verify_certs=True,
+            connection_class=RequestsHttpConnection,
+            timeout=30
+        )
         
     def _load_image(self, image_data: str) -> Image.Image:
         """Load an image from base64 string."""
@@ -84,60 +99,6 @@ class LambdaImageMatcher:
         except Exception as e:
             raise Exception(f"Error processing image: {str(e)}")
 
-    def get_similar_articles(self, image_data: str, limit: int = 15, threshold: float = 0.5) -> List[Dict]:
-        """Find similar articles based on input image."""
-        try:
-            start_time = time.time()
-            # Get the embedding for the input image
-            embedding = self.get_embedding(image_data)
-            embedding_list = embedding.cpu().numpy()[0].tolist()
-            print(f"[TIMING] Embedding generation total took: {time.time() - start_time:.2f}s")
-            
-            # Convert the embedding to a string format PostgreSQL can parse
-            embedding_str = f'[{",".join(map(str, embedding_list))}]'
-            
-            start_time = time.time()
-            conn = get_db_connection()
-            with conn.cursor() as cursor:
-                # Direct query using HNSW index
-                cursor.execute("""
-                    SELECT 
-                        article_id::text,
-                        1 - (embedding <=> %s::vector(512))::float as similarity
-                    FROM embeddings
-                    WHERE 1 - (embedding <=> %s::vector(512)) > %s
-                    ORDER BY embedding <=> %s::vector(512)
-                    LIMIT %s
-                """, (embedding_str, embedding_str, threshold, embedding_str, limit))
-                
-                rows = cursor.fetchall()
-            print(f"[TIMING] Database query took: {time.time() - start_time:.2f}s")
-            
-            if not rows:
-                return []
-            
-            # Log the first result for debugging
-            print(f"[DEBUG] First result - Article ID: {rows[0][0]}, Similarity: {rows[0][1]}")
-            
-            # Batch fetch article info
-            start_time = time.time()
-            article_ids = [str(row[0]) for row in rows]
-            articles_info = self._get_wiki_articles_info(article_ids)
-            print(f"[TIMING] Wikipedia API fetch took: {time.time() - start_time:.2f}s")
-            
-            return [
-                {
-                    'article_id': row[0],
-                    'title': articles_info.get(str(row[0]), {}).get('title', f'Article {row[0]}'),
-                    'url': articles_info.get(str(row[0]), {}).get('url', f'https://en.wikipedia.org/?curid={row[0]}'),
-                    'similarity': row[1]
-                }
-                for row in rows
-            ]
-                    
-        except Exception as e:
-            raise Exception(f"Error finding similar articles: {str(e)}")
-
     def _get_wiki_articles_info(self, article_ids: List[str]) -> Dict[str, Dict[str, str]]:
         """Batch fetch article info from Wikipedia API."""
         try:
@@ -163,6 +124,65 @@ class LambdaImageMatcher:
             }
         except Exception:
             return {}
+
+
+    def get_similar_articles(self, image_data: str, limit: int = 15, threshold: float = 0.5) -> List[Dict]:
+        """Find similar articles based on input image using OpenSearch k-NN."""
+        try:
+            start_time = time.time()
+            # Get the embedding for the input image
+            embedding = self.get_embedding(image_data)
+            embedding_list = embedding.cpu().numpy()[0].tolist()
+            print(f"[TIMING] Embedding generation total took: {time.time() - start_time:.2f}s")
+            start_time = time.time()
+            # Query OpenSearch using k-NN
+            query = {
+                "size": limit,
+                "query": {
+                    "knn": {
+                        "embedding": {
+                            "vector": embedding_list,
+                            "k": limit
+                        }
+                    }
+                },
+                "_source": ["article_id", "title", "url"]
+            }
+            
+            
+            response = self.opensearch.search(
+                body=query,
+                index="wiki-embeddings"
+            )
+            print(f"[TIMING] OpenSearch query took: {time.time() - start_time:.2f}s")
+                
+            hits = response['hits']['hits']
+            if not hits:
+                return []
+            
+            # Format results
+            article_ids = [str(hit['_source']['article_id']) for hit in hits]
+            articles_info = self._get_wiki_articles_info(article_ids)
+            
+            results = []
+            for hit in hits:
+                score = hit['_score']
+                if score < threshold:
+                    continue
+                    
+                source = hit['_source']
+                article_id = str(source['article_id'])
+                results.append({
+                    'article_id': source['article_id'],
+                    'title': articles_info.get(article_id, {}).get('title', f'Article {article_id}'),
+                    'url': articles_info.get(article_id, {}).get('url', f'https://en.wikipedia.org/?curid={article_id}'),
+                    'similarity': score
+                })
+            
+            return results
+                    
+        except Exception as e:
+            raise Exception(f"Error finding similar articles: {str(e)}")
 
 def lambda_handler(event, context):
     # Get the origin from the request
@@ -198,7 +218,7 @@ def lambda_handler(event, context):
         body = json.loads(event['body']) if isinstance(event.get('body'), str) else event.get('body', {})
         image_data = body.get('image')
         limit = int(body.get('limit', 15))
-        threshold = float(body.get('threshold', 0.2))
+        threshold = float(body.get('threshold', 0.05))
         
         if not image_data:
             return {

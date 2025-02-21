@@ -17,12 +17,20 @@ def test_local(image_path):
     with open(image_path, 'rb') as image_file:
         encoded_image = base64.b64encode(image_file.read()).decode('utf-8')
     
-    # Create mock event
+    # Create mock event with API Gateway context
     event = {
+        'requestContext': {
+            'http': {
+                'method': 'POST'
+            }
+        },
+        'headers': {
+            'origin': 'http://localhost:3000'
+        },
         'body': json.dumps({
             'image': encoded_image,
-            'limit': 5,
-            'threshold': 0.5
+            'limit': 15,
+            'threshold': 0.01  # Set very low threshold for testing
         })
     }
     
@@ -30,14 +38,22 @@ def test_local(image_path):
     result = lambda_handler(event, None)
     
     # Print results
+    print("\nAPI Response:")
+    print(f"Status Code: {result['statusCode']}")
+    print(f"Headers: {result['headers']}")
+    print(f"Raw Body: {result['body']}")
+    
     if result['statusCode'] == 200:
-        results = json.loads(result['body'])['results']
-        print("\nFound similar articles:")
+        response_data = json.loads(result['body'])
+        print("\nParsed Response:")
+        print(f"Execution Time: {response_data.get('execution_time', 'N/A')}s")
+        results = response_data.get('results', [])
+        print(f"\nFound {len(results)} similar articles:")
         for article in results:
-            print(f"- {article['title']} (similarity: {article['similarity']:.3f})")
+            print(f"- {article['title']} (similarity: {article['similarity']:.4f})")
             print(f"  URL: {article['url']}")
     else:
-        print(f"Error: {result['body']}")
+        print(f"\nError: {result['body']}")
 
 def test_deployed(api_url, image_path):
     """Test the deployed Lambda function via API Gateway"""
