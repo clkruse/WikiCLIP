@@ -189,7 +189,9 @@ def lambda_handler(event, context):
     origin = event.get('headers', {}).get('origin', '')
     allowed_domains = [
         'calebkruse.com',
-        'clkruse.github.io'
+        'clkruse.github.io',
+        'localhost',
+        '127.0.0.1'
     ]
     
     # Check if origin matches any allowed domain
