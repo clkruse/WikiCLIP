@@ -20,6 +20,7 @@ pip install -r lambda_requirements.txt
 # Create deployment directory
 mkdir -p deployment
 cp lambda_handler.py deployment/
+cp s3_vectors_client.py deployment/
 
 # Find the site-packages directory
 SITE_PACKAGES_DIR=$(find lambda_venv/lib -name site-packages)
@@ -30,10 +31,10 @@ zip -r ../../../../deployment/lambda_package.zip .
 
 # Add our lambda handler
 cd ../../../../deployment
-zip -g lambda_package.zip lambda_handler.py
+zip -g lambda_package.zip lambda_handler.py s3_vectors_client.py
 
 # Clean up
 cd ..
-rm -rf lambda_venv deployment/lambda_handler.py
+rm -rf lambda_venv deployment/lambda_handler.py deployment/s3_vectors_client.py
 
 echo "Deployment package created at deployment/lambda_package.zip" 

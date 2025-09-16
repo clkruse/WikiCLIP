@@ -1,8 +1,7 @@
-torch
+torch==2.5.1
 numpy==1.26.3
 Pillow
 transformers
 requests
-opensearch-py
-requests-aws4auth
 boto3
+safetensors>=0.4.5
