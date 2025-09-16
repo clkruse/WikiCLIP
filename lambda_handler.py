@@ -1,17 +1,16 @@
 import json
 import os
 import torch
-from opensearchpy import OpenSearch, RequestsHttpConnection
-from requests_aws4auth import AWS4Auth
-import boto3
-import numpy as np
+# boto3 and numpy are not used directly in this module
 from PIL import Image
 import requests
 from io import BytesIO
 from typing import Dict, List
-from transformers import CLIPProcessor, CLIPModel
+from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
 import base64
 import time
+
+from s3_vectors_client import S3VectorsClient, format_similarity
 
 # Initialize global instances for reuse across invocations
 _matcher = None
@@ -26,40 +25,50 @@ def get_matcher():
 
 class LambdaImageMatcher:
     def __init__(self, model_name: str = "openai/clip-vit-base-patch32"):
-        """Initialize the matcher with CLIP model and OpenSearch client."""
-        # Initialize CLIP model
+        """Initialize the matcher with CLIP model and S3 Vectors client."""
+        # Initialize CLIP vision-only model (smaller, faster to load) and image processor
         start_time = time.time()
         self.device = "cpu"  # Lambda only supports CPU
-        self.model = CLIPModel.from_pretrained(model_name).to(self.device)
+        # Use writable temp cache to avoid warnings and overhead on Lambda
+        os.environ.setdefault("HF_HOME", "/tmp/hf")
+        os.environ.setdefault("TRANSFORMERS_CACHE", "/tmp/hf")
+        os.environ.setdefault("DNNL_PRIMITIVE_CACHE_CAPACITY", "512")
+        cache_dir = os.environ.get("TRANSFORMERS_CACHE", "/tmp/hf")
+        # Prefer a local directory with pre-downloaded assets if present
+        model_path = os.environ.get("CLIP_MODEL_PATH", "/opt/ml/clip")
+        # Limit intraop threads to reduce init overhead in Lambda
+        try:
+            torch.set_num_threads(max(1, int(os.environ.get("PYTORCH_NUM_THREADS", "1"))))
+        except Exception:
+            pass
+
+        self.model = CLIPVisionModelWithProjection.from_pretrained(
+            model_path if os.path.isdir(model_path) else model_name,
+            local_files_only=True,
+            cache_dir=cache_dir,
+        ).to(self.device)
         print(f"[TIMING] Model loading took: {time.time() - start_time:.2f}s")
         
         start_time = time.time()
-        self.processor = CLIPProcessor.from_pretrained(model_name)
+        self.processor = CLIPImageProcessor.from_pretrained(
+            model_path if os.path.isdir(model_path) else model_name,
+            local_files_only=True,
+            cache_dir=cache_dir,
+        )
         print(f"[TIMING] Processor loading took: {time.time() - start_time:.2f}s")
         
         self.model.eval()  # Ensure model is in eval mode
         torch.set_grad_enabled(False)  # Disable gradient computation globally
         
-        # Initialize OpenSearch client
-        region = os.environ.get('AWS_REGION', 'us-east-1')
-        service = 'es'
-        credentials = boto3.Session().get_credentials()
-        awsauth = AWS4Auth(
-            credentials.access_key,
-            credentials.secret_key,
-            region,
-            service,
-            session_token=credentials.token
-        )
-        
-        self.opensearch = OpenSearch(
-            hosts=[{'host': os.environ['OPENSEARCH_ENDPOINT'], 'port': 443}],
-            http_auth=awsauth,
-            use_ssl=True,
-            verify_certs=True,
-            connection_class=RequestsHttpConnection,
-            timeout=30
-        )
+        # Initialize S3 Vectors client (uses env vars for bucket/index/region)
+        self.s3vectors = S3VectorsClient()
+
+        # Warm-up: run a minimal forward once to build optimized primitives
+        try:
+            dummy = torch.zeros(1, 3, 224, 224)
+            _ = self.model(pixel_values=dummy)
+        except Exception:
+            pass
         
     def _load_image(self, image_data: str) -> Image.Image:
         """Load an image from base64 string."""
@@ -83,16 +92,12 @@ class LambdaImageMatcher:
             image = self._load_image(image_data)
             
             start_time = time.time()
-            inputs = self.processor(
-                images=image,
-                return_tensors="pt"
-            )
+            inputs = self.processor(images=image, return_tensors="pt")
             print(f"[TIMING] Image preprocessing took: {time.time() - start_time:.2f}s")
             
             start_time = time.time()
-            image_features = self.model.get_image_features(
-                **{k: v.to(self.device) for k, v in inputs.items()}
-            )
+            outputs = self.model(pixel_values=inputs["pixel_values"].to(self.device))
+            image_features = outputs.image_embeds
             print(f"[TIMING] Model inference took: {time.time() - start_time:.2f}s")
             
             return image_features / image_features.norm(dim=-1, keepdim=True)
@@ -127,7 +132,7 @@ class LambdaImageMatcher:
 
 
     def get_similar_articles(self, image_data: str, limit: int = 15, threshold: float = 0.5) -> List[Dict]:
-        """Find similar articles based on input image using OpenSearch k-NN."""
+        """Find similar articles based on input image using S3 Vectors."""
         try:
             start_time = time.time()
             # Get the embedding for the input image
@@ -135,50 +140,39 @@ class LambdaImageMatcher:
             embedding_list = embedding.cpu().numpy()[0].tolist()
             print(f"[TIMING] Embedding generation total took: {time.time() - start_time:.2f}s")
             start_time = time.time()
-            # Query OpenSearch using k-NN
-            query = {
-                "size": limit,
-                "query": {
-                    "knn": {
-                        "embedding": {
-                            "vector": embedding_list,
-                            "k": limit
-                        }
-                    }
-                },
-                "_source": ["article_id", "title", "url"]
-            }
-            
-            
-            response = self.opensearch.search(
-                body=query,
-                index="wiki-embeddings"
+            # Query S3 Vectors
+            vectors = self.s3vectors.query(
+                query_vector=embedding_list,
+                top_k=limit,
+                return_distance=True,
+                return_metadata=True,
             )
-            print(f"[TIMING] OpenSearch query took: {time.time() - start_time:.2f}s")
-                
-            hits = response['hits']['hits']
-            if not hits:
-                return []
-            
-            # Format results
-            article_ids = [str(hit['_source']['article_id']) for hit in hits]
-            articles_info = self._get_wiki_articles_info(article_ids)
-            
-            results = []
-            for hit in hits:
-                score = hit['_score']
-                if score < threshold:
+            print(f"[TIMING] S3 Vectors query took: {time.time() - start_time:.2f}s")
+
+            results: List[Dict] = []
+            for item in vectors:
+                sim = format_similarity(item.get("distance"), os.environ.get("S3_VECTORS_DISTANCE", "Cosine"))
+                if sim is None or sim < threshold:
                     continue
-                    
-                source = hit['_source']
-                article_id = str(source['article_id'])
-                results.append({
-                    'article_id': source['article_id'],
-                    'title': articles_info.get(article_id, {}).get('title', f'Article {article_id}'),
-                    'url': articles_info.get(article_id, {}).get('url', f'https://en.wikipedia.org/?curid={article_id}'),
-                    'similarity': score
-                })
-            
+                meta = item.get("metadata", {}) or {}
+                article_id = str(meta.get("article_id", item.get("key", "")))
+                # Backfill titles/urls if not stored in metadata
+                title = meta.get("title")
+                url = meta.get("url")
+                if not title or not url:
+                    article_info = self._get_wiki_articles_info([article_id]).get(article_id, {})
+                    title = title or article_info.get("title", f"Article {article_id}")
+                    url = url or article_info.get("url", f"https://en.wikipedia.org/?curid={article_id}")
+
+                results.append(
+                    {
+                        "article_id": int(article_id) if article_id.isdigit() else article_id,
+                        "title": title,
+                        "url": url,
+                        "similarity": sim,
+                    }
+                )
+
             return results
                     
         except Exception as e:

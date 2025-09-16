@@ -1,0 +1,1 @@
+{ "Version": "2012-10-17", "Statement": [ { "Sid": "S3VectorsReadQuery", "Effect": "Allow", "Action": [ "s3vectors:QueryVectors", "s3vectors:ListVectors", "s3vectors:GetVectors" ], "Resource": "*", "Condition": { "StringEquals": { "aws:RequestedRegion": "us-east-1" } } } ] }

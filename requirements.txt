@@ -3,13 +3,14 @@ uvicorn
 python-multipart
 Pillow
 numpy
-torch
+torch==2.5.1
 transformers
 requests
 Jinja2
 aiofiles
-supabase
 tqdm
 python-dotenv
 psycopg2
 mwclient
+boto3
+safetensors>=0.4.5
