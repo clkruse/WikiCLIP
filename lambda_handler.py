@@ -1,8 +1,7 @@
 import json
 import os
 import torch
-import boto3
-import numpy as np
+# boto3 and numpy are not used directly in this module
 from PIL import Image
 import requests
 from io import BytesIO
@@ -31,6 +30,8 @@ class LambdaImageMatcher:
         start_time = time.time()
         self.device = "cpu"  # Lambda only supports CPU
         cache_dir = os.environ.get("TRANSFORMERS_CACHE", "/opt/ml/model")
+        # Prefer a local directory with pre-downloaded assets if present
+        model_path = os.environ.get("CLIP_MODEL_PATH", "/opt/ml/clip")
         # Limit intraop threads to reduce init overhead in Lambda
         try:
             torch.set_num_threads(max(1, int(os.environ.get("PYTORCH_NUM_THREADS", "1"))))
@@ -38,17 +39,15 @@ class LambdaImageMatcher:
             pass
 
         self.model = CLIPVisionModelWithProjection.from_pretrained(
-            model_name,
+            model_path if os.path.isdir(model_path) else model_name,
             local_files_only=True,
             cache_dir=cache_dir,
-            use_safetensors=True,
-            low_cpu_mem_usage=True,
         ).to(self.device)
         print(f"[TIMING] Model loading took: {time.time() - start_time:.2f}s")
         
         start_time = time.time()
         self.processor = CLIPImageProcessor.from_pretrained(
-            model_name,
+            model_path if os.path.isdir(model_path) else model_name,
             local_files_only=True,
             cache_dir=cache_dir,
         )

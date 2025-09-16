@@ -1,7 +1,10 @@
 torch==2.5.1
 numpy==1.26.3
 Pillow
-transformers
+# Pin to avoid pulling extras that require Rust builds (hf-xet)
+transformers==4.44.2
+huggingface_hub==0.23.2
+tokenizers==0.19.1
 requests
 boto3
 safetensors>=0.4.5
