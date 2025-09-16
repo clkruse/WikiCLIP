@@ -29,7 +29,11 @@ class LambdaImageMatcher:
         # Initialize CLIP vision-only model (smaller, faster to load) and image processor
         start_time = time.time()
         self.device = "cpu"  # Lambda only supports CPU
-        cache_dir = os.environ.get("TRANSFORMERS_CACHE", "/opt/ml/model")
+        # Use writable temp cache to avoid warnings and overhead on Lambda
+        os.environ.setdefault("HF_HOME", "/tmp/hf")
+        os.environ.setdefault("TRANSFORMERS_CACHE", "/tmp/hf")
+        os.environ.setdefault("DNNL_PRIMITIVE_CACHE_CAPACITY", "512")
+        cache_dir = os.environ.get("TRANSFORMERS_CACHE", "/tmp/hf")
         # Prefer a local directory with pre-downloaded assets if present
         model_path = os.environ.get("CLIP_MODEL_PATH", "/opt/ml/clip")
         # Limit intraop threads to reduce init overhead in Lambda
@@ -58,6 +62,13 @@ class LambdaImageMatcher:
         
         # Initialize S3 Vectors client (uses env vars for bucket/index/region)
         self.s3vectors = S3VectorsClient()
+
+        # Warm-up: run a minimal forward once to build optimized primitives
+        try:
+            dummy = torch.zeros(1, 3, 224, 224)
+            _ = self.model(pixel_values=dummy)
+        except Exception:
+            pass
         
     def _load_image(self, image_data: str) -> Image.Image:
         """Load an image from base64 string."""
